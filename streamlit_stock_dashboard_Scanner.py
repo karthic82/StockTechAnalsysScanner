@@ -20,24 +20,61 @@ def get_stock_data(symbol, period="5y"):
     df = data.history(period=period)
     return df
 
-def get_trend(symbol):
-    """Calculates EMA crossover to determine Bullish/Bearish trend for the Scanner."""
+def scan_stock(symbol, deep_scan=False):
+    """Calculates metrics for the scanner. Adjusts depth based on user selection."""
     try:
-        df = get_stock_data(symbol, "1y")
+        # Fetch less data for a fast scan, full data for a deep scan
+        period = "5y" if deep_scan else "1y"
+        df = get_stock_data(symbol, period)
+        
         if df.empty or len(df) < 50:
-            return "Not Enough Data ⚠️"
+            return {"Trend": "Not Enough Data ⚠️"}
+            
+        # Base indicators for Trend
         df.ta.ema(length=20, append=True)
         df.ta.ema(length=50, append=True)
         latest = df.iloc[-1]
+        ltp = latest['Close']
         
         if latest['EMA_20'] > latest['EMA_50']:
-            return "Bullish 🟢"
+            trend = "Bullish 🟢"
         elif latest['EMA_20'] < latest['EMA_50']:
-            return "Bearish 🔴"
+            trend = "Bearish 🔴"
         else:
-            return "Neutral ⚪"
+            trend = "Neutral ⚪"
+            
+        # Fast scan returns just the trend
+        if not deep_scan:
+            return {"Trend": trend, "LTP": round(ltp, 2)}
+            
+        # Deep scan adds advanced metrics
+        if len(df) < 252:
+             return {"Trend": f"{trend} (Limited Data)"}
+             
+        df.ta.ema(length=200, append=True)
+        df.ta.rsi(length=14, append=True)
+        df.ta.adx(length=14, append=True)
+        latest = df.iloc[-1]
+        
+        def get_ret(days):
+            if len(df) > days:
+                return ((ltp - df['Close'].iloc[-days]) / df['Close'].iloc[-days]) * 100
+            return None
+
+        return {
+            "Trend": trend,
+            "LTP": round(ltp, 2),
+            "1M Ret %": round(get_ret(21), 2) if get_ret(21) else None,
+            "3M Ret %": round(get_ret(63), 2) if get_ret(63) else None,
+            "6M Ret %": round(get_ret(126), 2) if get_ret(126) else None,
+            "12M Ret %": round(get_ret(252), 2) if get_ret(252) else None,
+            "EMA 20": round(latest.get('EMA_20', np.nan), 2),
+            "EMA 200": round(latest.get('EMA_200', np.nan), 2),
+            "RSI": round(latest.get('RSI_14', np.nan), 2),
+            "ADX": round(latest.get('ADX_14', np.nan), 2)
+        }
     except Exception:
-        return "Error ⚠️"
+        return {"Trend": "Error ⚠️"}
 
 def format_symbol(raw_symbol, exchange):
     """Formats the symbol based on the selected exchange."""
@@ -72,8 +109,6 @@ app_mode = st.sidebar.radio("Choose a tool:", ["Single Stock Analysis", "Bulk St
 # MODE 1: SINGLE STOCK ANALYSIS
 # -----------------------------------------------------------------------------
 if app_mode == "Single Stock Analysis":
-    
-    # Restored Custom HTML Title
     st.markdown("""
         <h2 style='text-align: center; margin-bottom: 30px;'>
             <span style='color: tomato;'>Tech Nuggets's</span> 
@@ -89,7 +124,6 @@ if app_mode == "Single Stock Analysis":
     raw_symbol = st.sidebar.text_input("Stock Symbol e.g. AAPL", "AAPL")
     timeframe = st.sidebar.selectbox("Timeframe?", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
     
-    # Toggles mapped exactly to your screenshot
     show_data = st.sidebar.checkbox("Show Data", value=True)
     show_chart = st.sidebar.checkbox("Show Chart", value=False)
     
@@ -97,20 +131,17 @@ if app_mode == "Single Stock Analysis":
     
     if symbol:
         with st.spinner(f"Fetching data for {symbol}..."):
-            # Fetch 5 years of data for accurate background math
             full_df = get_stock_data(symbol, period="5y")
             
         if full_df.empty:
             st.warning(f"⚠️ No data found for symbol '{symbol}'. Please check the spelling or try a different exchange.")
             st.stop()
             
-        # 1. Calculate ALL Technical Indicators on the FULL DataFrame
         full_df.ta.ema(length=20, append=True)
         full_df.ta.ema(length=200, append=True)
         full_df.ta.rsi(length=14, append=True)
-        full_df.ta.adx(length=14, append=True) # Adds ADX_14, DMP_14, DMN_14
+        full_df.ta.adx(length=14, append=True) 
         
-        # 2. Extract Latest Metrics
         latest = full_df.iloc[-1]
         ltp = latest['Close']
         ema20 = latest.get('EMA_20', np.nan)
@@ -120,7 +151,6 @@ if app_mode == "Single Stock Analysis":
         dmp = latest.get('DMP_14', np.nan)
         dmn = latest.get('DMN_14', np.nan)
         
-        # 3. Build the 3-Column Metrics UI
         col1, col2, col3 = st.columns(3)
         
         with col1:
@@ -149,41 +179,27 @@ if app_mode == "Single Stock Analysis":
             
         st.write("---")
         
-        # 4. Slice the dataframe to match the user's requested timeframe for Data/Chart display
         days_dict = {"1mo": 21, "3mo": 63, "6mo": 126, "1y": 252, "2y": 504, "5y": len(full_df)}
         display_period = days_dict.get(timeframe, 252)
         df_sliced = full_df.iloc[-display_period:].copy()
         
-        # 5. Show Data Logic
         if show_data:
             display_df = df_sliced.copy()
-            
-            # Format the index to match screenshot ("time" in YYYY-MM-DD format)
             display_df.index = display_df.index.strftime('%Y-%m-%d')
             display_df.index.name = "time"
             
-            # Keep only the relevant columns and rename core price columns to lowercase 
             columns_to_keep = ['Open', 'High', 'Low', 'Close', 'Volume', 'EMA_20', 'EMA_200', 'RSI_14', 'ADX_14', 'DMP_14', 'DMN_14']
-            # Filter to columns that actually exist to prevent errors on new stocks
             columns_to_keep = [c for c in columns_to_keep if c in display_df.columns]
             display_df = display_df[columns_to_keep]
-            
             display_df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
-            
-            # Reverse the dataframe to show latest dates at the top (matching the screenshot)
             display_df = display_df.iloc[::-1]
-            
             st.dataframe(display_df, use_container_width=True)
 
-        # 6. Show Chart Logic
         if show_chart:
             st.subheader(f"Price Chart: {symbol}")
             fig = go.Figure()
-            
-            # Candlesticks
             fig.add_trace(go.Candlestick(x=df_sliced.index, open=df_sliced['Open'], high=df_sliced['High'], low=df_sliced['Low'], close=df_sliced['Close'], name='Price'))
             
-            # EMAs
             if 'EMA_20' in df_sliced:
                 fig.add_trace(go.Scatter(x=df_sliced.index, y=df_sliced['EMA_20'], line=dict(color='orange', width=1.5), name='20 EMA'))
             if 'EMA_200' in df_sliced:
@@ -200,10 +216,13 @@ elif app_mode == "Bulk Stock Scanner":
     st.markdown("""
     Upload a **CSV** or **Excel** file containing a list of stock symbols. 
     The file must have a column header named exactly **Symbol**.
-    *Note: The scanner uses a 20-EMA vs 50-EMA crossover to determine the trend.*
     """)
     
     scan_exchange = st.radio("Apply exchange formatting to the uploaded list?", ["Keep As Is (US/Mixed)", "Append .NS (NSE)", "Append .BO (BSE)"])
+    
+    # NEW: Toggle for deep metrics
+    deep_scan = st.checkbox("Include Deep Metrics (Returns, RSI, ADX, etc.) ⚠️ Note: Checking this makes the scan slower. Recommended for lists under 200 stocks.", value=False)
+    
     uploaded_file = st.file_uploader("Upload your list", type=["csv", "xlsx"])
     
     if uploaded_file:
@@ -235,15 +254,28 @@ elif app_mode == "Bulk Stock Scanner":
                         sym = raw_sym.strip().upper()
                         
                     status_text.text(f"Scanning {sym} ({i+1}/{len(raw_symbols)})...")
-                    trend = get_trend(sym)
-                    results.append({"Scanned Symbol": sym, "Original File Symbol": raw_sym, "Trend": trend})
+                    
+                    # Fetch the metrics based on user selection
+                    scan_data = scan_stock(sym, deep_scan=deep_scan)
+                    
+                    # Build the row dictionary
+                    row_data = {"Scanned Symbol": sym, "Original File Symbol": raw_sym}
+                    row_data.update(scan_data) # Merges the metrics into the row
+                    results.append(row_data)
+                    
                     progress_bar.progress((i + 1) / len(raw_symbols))
                     
                 status_text.text("Scan Complete! 🎉")
                 
                 results_df = pd.DataFrame(results)
-                bullish_df = results_df[results_df['Trend'].str.contains("Bullish", na=False)]
-                bearish_df = results_df[results_df['Trend'].str.contains("Bearish", na=False)]
+                
+                # Make sure the Trend column exists before filtering
+                if 'Trend' in results_df.columns:
+                    bullish_df = results_df[results_df['Trend'].astype(str).str.contains("Bullish", na=False)]
+                    bearish_df = results_df[results_df['Trend'].astype(str).str.contains("Bearish", na=False)]
+                else:
+                    bullish_df = pd.DataFrame()
+                    bearish_df = pd.DataFrame()
                 
                 tab1, tab2, tab3 = st.tabs([f"Bullish 🟢 ({len(bullish_df)})", f"Bearish 🔴 ({len(bearish_df)})", f"All Results ({len(results_df)})"])
                 
