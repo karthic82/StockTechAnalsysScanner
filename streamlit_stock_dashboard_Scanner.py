@@ -73,6 +73,9 @@ if app_mode == "Single Stock Analysis":
     raw_symbol = st.sidebar.text_input("Enter Symbol (e.g., AAPL, RELIANCE)", "AAPL")
     timeframe = st.sidebar.selectbox("Select Timeframe", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
     
+    # Toggle for raw data
+    show_data = st.sidebar.checkbox("Show Raw Data", value=False)
+    
     symbol = format_symbol(raw_symbol, exchange_option)
     
     if symbol:
@@ -97,6 +100,15 @@ if app_mode == "Single Stock Analysis":
         cols[0].metric("Latest Close", f"{latest_close:.2f}", f"{change:.2f} ({pct_change:.2f}%)")
         cols[1].metric("20-Day EMA", f"{df['EMA_20'].iloc[-1]:.2f}")
         cols[2].metric("50-Day EMA", f"{df['EMA_50'].iloc[-1]:.2f}")
+        
+        # Logic to display the raw data if the checkbox is ticked
+        if show_data:
+            st.subheader(f"Raw Data: {symbol}")
+            # Create a display copy to format the dates cleanly without breaking the chart
+            display_df = df.copy()
+            display_df.index = display_df.index.strftime('%Y-%m-%d')
+            st.dataframe(display_df, use_container_width=True)
+            st.divider() # Adds a clean visual line before the chart
         
         # Plotly Chart
         st.subheader(f"Price Chart: {symbol}")
