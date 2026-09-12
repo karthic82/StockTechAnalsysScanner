@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 import plotly.graph_objects as go
+import numpy as np
 
 # -----------------------------------------------------------------------------
 # APP CONFIGURATION
@@ -12,35 +13,29 @@ st.set_page_config(page_title="Tech Nuggets Stock Dashboard", layout="wide")
 # -----------------------------------------------------------------------------
 # HELPER FUNCTIONS
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=3600) # Cache data for 1 hour to prevent excessive API calls
-def get_stock_data(symbol, period):
+@st.cache_data(ttl=3600)
+def get_stock_data(symbol, period="5y"):
+    """Always fetch 5 years of data by default to ensure 200 EMA and 12-mo returns calculate properly."""
     data = yf.Ticker(symbol)
     df = data.history(period=period)
     return df
 
 def get_trend(symbol):
-    """Calculates EMA crossover to determine Bullish/Bearish trend."""
+    """Calculates EMA crossover to determine Bullish/Bearish trend for the Scanner."""
     try:
-        # Fetch 3 months of data to ensure enough periods for 50-day EMA
-        df = get_stock_data(symbol, "3mo")
-        
+        df = get_stock_data(symbol, "1y")
         if df.empty or len(df) < 50:
             return "Not Enough Data ⚠️"
-        
-        # Calculate EMAs
         df.ta.ema(length=20, append=True)
         df.ta.ema(length=50, append=True)
-        
         latest = df.iloc[-1]
         
-        # Determine trend
         if latest['EMA_20'] > latest['EMA_50']:
             return "Bullish 🟢"
         elif latest['EMA_20'] < latest['EMA_50']:
             return "Bearish 🔴"
         else:
             return "Neutral ⚪"
-            
     except Exception:
         return "Error ⚠️"
 
@@ -49,12 +44,23 @@ def format_symbol(raw_symbol, exchange):
     raw_symbol = str(raw_symbol).strip().upper()
     if not raw_symbol:
         return ""
-        
     if exchange == "NSE (India)" and not raw_symbol.endswith('.NS'):
         return f"{raw_symbol}.NS"
     elif exchange == "BSE (India)" and not raw_symbol.endswith('.BO'):
         return f"{raw_symbol}.BO"
     return raw_symbol
+
+def calculate_return(df, days):
+    """Safely calculates percentage returns based on trading days."""
+    if len(df) > days:
+        ret = ((df['Close'].iloc[-1] - df['Close'].iloc[-days]) / df['Close'].iloc[-days]) * 100
+        icon = "✅" if ret > 0 else "🔴"
+        return f"{ret:.2f}% {icon}"
+    return "N/A"
+
+def safe_get(value):
+    """Formats numerical values safely to avoid NaN errors."""
+    return f"{value:.2f}" if pd.notna(value) else "N/A"
 
 # -----------------------------------------------------------------------------
 # SIDEBAR NAVIGATION
@@ -66,63 +72,125 @@ app_mode = st.sidebar.radio("Choose a tool:", ["Single Stock Analysis", "Bulk St
 # MODE 1: SINGLE STOCK ANALYSIS
 # -----------------------------------------------------------------------------
 if app_mode == "Single Stock Analysis":
-    st.title("📈 Single Stock Technical Analysis")
+    
+    # Restored Custom HTML Title
+    st.markdown("""
+        <h2 style='text-align: center; margin-bottom: 30px;'>
+            <span style='color: tomato;'>Tech Nuggets's</span> 
+            <span style='color: white;'>Stock</span> 
+            <span style='color: limegreen;'>Technical</span> 
+            <span style='color: tomato;'>Analysis</span> 
+            <span style='color: mediumpurple;'>Dashboard!</span>
+        </h2>
+    """, unsafe_allow_html=True)
     
     st.sidebar.header("Configuration")
     exchange_option = st.sidebar.selectbox("Select Exchange", ["US Stocks", "NSE (India)", "BSE (India)"])
-    raw_symbol = st.sidebar.text_input("Enter Symbol (e.g., AAPL, RELIANCE)", "AAPL")
-    timeframe = st.sidebar.selectbox("Select Timeframe", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+    raw_symbol = st.sidebar.text_input("Stock Symbol e.g. AAPL", "AAPL")
+    timeframe = st.sidebar.selectbox("Timeframe?", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
     
-    # Toggle for raw data
-    show_data = st.sidebar.checkbox("Show Raw Data", value=False)
+    # Toggles mapped exactly to your screenshot
+    show_data = st.sidebar.checkbox("Show Data", value=True)
+    show_chart = st.sidebar.checkbox("Show Chart", value=False)
     
     symbol = format_symbol(raw_symbol, exchange_option)
     
     if symbol:
         with st.spinner(f"Fetching data for {symbol}..."):
-            df = get_stock_data(symbol, timeframe)
+            # Fetch 5 years of data for accurate background math
+            full_df = get_stock_data(symbol, period="5y")
             
-        if df.empty:
+        if full_df.empty:
             st.warning(f"⚠️ No data found for symbol '{symbol}'. Please check the spelling or try a different exchange.")
             st.stop()
             
-        # Calculate moving averages for the chart
-        df.ta.ema(length=20, append=True)
-        df.ta.ema(length=50, append=True)
+        # 1. Calculate ALL Technical Indicators on the FULL DataFrame
+        full_df.ta.ema(length=20, append=True)
+        full_df.ta.ema(length=200, append=True)
+        full_df.ta.rsi(length=14, append=True)
+        full_df.ta.adx(length=14, append=True) # Adds ADX_14, DMP_14, DMN_14
         
-        # Display Metrics
-        latest_close = df['Close'].iloc[-1]
-        prev_close = df['Close'].iloc[-2]
-        change = latest_close - prev_close
-        pct_change = (change / prev_close) * 100
+        # 2. Extract Latest Metrics
+        latest = full_df.iloc[-1]
+        ltp = latest['Close']
+        ema20 = latest.get('EMA_20', np.nan)
+        ema200 = latest.get('EMA_200', np.nan)
+        rsi = latest.get('RSI_14', np.nan)
+        adx = latest.get('ADX_14', np.nan)
+        dmp = latest.get('DMP_14', np.nan)
+        dmn = latest.get('DMN_14', np.nan)
         
-        cols = st.columns(4)
-        cols[0].metric("Latest Close", f"{latest_close:.2f}", f"{change:.2f} ({pct_change:.2f}%)")
-        cols[1].metric("20-Day EMA", f"{df['EMA_20'].iloc[-1]:.2f}")
-        cols[2].metric("50-Day EMA", f"{df['EMA_50'].iloc[-1]:.2f}")
+        # 3. Build the 3-Column Metrics UI
+        col1, col2, col3 = st.columns(3)
         
-        # Logic to display the raw data if the checkbox is ticked
+        with col1:
+            st.subheader("Returns")
+            st.markdown(f"- **1 MONTH :** {calculate_return(full_df, 21)}")
+            st.markdown(f"- **3 MONTHS :** {calculate_return(full_df, 63)}")
+            st.markdown(f"- **6 MONTHS :** {calculate_return(full_df, 126)}")
+            st.markdown(f"- **12 MONTHS :** {calculate_return(full_df, 252)}")
+            
+        with col2:
+            st.subheader("Momentum")
+            st.markdown(f"- **LTP :** {ltp:.2f}")
+            ema20_icon = "✅" if pd.notna(ema20) and ltp > ema20 else "🔴"
+            st.markdown(f"- **EMA20 :** {safe_get(ema20)} {ema20_icon}")
+            ema200_icon = "✅" if pd.notna(ema200) and ltp > ema200 else "🔴"
+            st.markdown(f"- **EMA200 :** {safe_get(ema200)} {ema200_icon}")
+            rsi_icon = "✅" if pd.notna(rsi) and rsi > 50 else "🔴"
+            st.markdown(f"- **RSI :** {safe_get(rsi)} {rsi_icon}")
+            
+        with col3:
+            st.subheader("Trend Strength")
+            adx_icon = "✅" if pd.notna(adx) and adx > 25 else "🔴"
+            st.markdown(f"- **ADX :** {safe_get(adx)} {adx_icon}")
+            st.markdown(f"- **DMP :** {safe_get(dmp)}")
+            st.markdown(f"- **DMN :** {safe_get(dmn)}")
+            
+        st.write("---")
+        
+        # 4. Slice the dataframe to match the user's requested timeframe for Data/Chart display
+        days_dict = {"1mo": 21, "3mo": 63, "6mo": 126, "1y": 252, "2y": 504, "5y": len(full_df)}
+        display_period = days_dict.get(timeframe, 252)
+        df_sliced = full_df.iloc[-display_period:].copy()
+        
+        # 5. Show Data Logic
         if show_data:
-            st.subheader(f"Raw Data: {symbol}")
-            # Create a display copy to format the dates cleanly without breaking the chart
-            display_df = df.copy()
+            display_df = df_sliced.copy()
+            
+            # Format the index to match screenshot ("time" in YYYY-MM-DD format)
             display_df.index = display_df.index.strftime('%Y-%m-%d')
+            display_df.index.name = "time"
+            
+            # Keep only the relevant columns and rename core price columns to lowercase 
+            columns_to_keep = ['Open', 'High', 'Low', 'Close', 'Volume', 'EMA_20', 'EMA_200', 'RSI_14', 'ADX_14', 'DMP_14', 'DMN_14']
+            # Filter to columns that actually exist to prevent errors on new stocks
+            columns_to_keep = [c for c in columns_to_keep if c in display_df.columns]
+            display_df = display_df[columns_to_keep]
+            
+            display_df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
+            
+            # Reverse the dataframe to show latest dates at the top (matching the screenshot)
+            display_df = display_df.iloc[::-1]
+            
             st.dataframe(display_df, use_container_width=True)
-            st.divider() # Adds a clean visual line before the chart
-        
-        # Plotly Chart
-        st.subheader(f"Price Chart: {symbol}")
-        fig = go.Figure()
-        
-        # Candlesticks
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
-        
-        # EMAs
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_20'], line=dict(color='orange', width=1.5), name='20 EMA'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='blue', width=1.5), name='50 EMA'))
-        
-        fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0))
-        st.plotly_chart(fig, use_container_width=True)
+
+        # 6. Show Chart Logic
+        if show_chart:
+            st.subheader(f"Price Chart: {symbol}")
+            fig = go.Figure()
+            
+            # Candlesticks
+            fig.add_trace(go.Candlestick(x=df_sliced.index, open=df_sliced['Open'], high=df_sliced['High'], low=df_sliced['Low'], close=df_sliced['Close'], name='Price'))
+            
+            # EMAs
+            if 'EMA_20' in df_sliced:
+                fig.add_trace(go.Scatter(x=df_sliced.index, y=df_sliced['EMA_20'], line=dict(color='orange', width=1.5), name='20 EMA'))
+            if 'EMA_200' in df_sliced:
+                fig.add_trace(go.Scatter(x=df_sliced.index, y=df_sliced['EMA_200'], line=dict(color='blue', width=1.5), name='200 EMA'))
+            
+            fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0))
+            st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------------------------------------------------------
 # MODE 2: BULK STOCK SCANNER
@@ -136,7 +204,6 @@ elif app_mode == "Bulk Stock Scanner":
     """)
     
     scan_exchange = st.radio("Apply exchange formatting to the uploaded list?", ["Keep As Is (US/Mixed)", "Append .NS (NSE)", "Append .BO (BSE)"])
-    
     uploaded_file = st.file_uploader("Upload your list", type=["csv", "xlsx"])
     
     if uploaded_file:
@@ -160,7 +227,6 @@ elif app_mode == "Bulk Stock Scanner":
                 status_text = st.empty()
                 
                 for i, raw_sym in enumerate(raw_symbols):
-                    # Format symbol based on radio selection
                     if scan_exchange == "Append .NS (NSE)":
                         sym = format_symbol(raw_sym, "NSE (India)")
                     elif scan_exchange == "Append .BO (BSE)":
@@ -169,15 +235,12 @@ elif app_mode == "Bulk Stock Scanner":
                         sym = raw_sym.strip().upper()
                         
                     status_text.text(f"Scanning {sym} ({i+1}/{len(raw_symbols)})...")
-                    
                     trend = get_trend(sym)
                     results.append({"Scanned Symbol": sym, "Original File Symbol": raw_sym, "Trend": trend})
-                    
                     progress_bar.progress((i + 1) / len(raw_symbols))
                     
                 status_text.text("Scan Complete! 🎉")
                 
-                # Display Results
                 results_df = pd.DataFrame(results)
                 bullish_df = results_df[results_df['Trend'].str.contains("Bullish", na=False)]
                 bearish_df = results_df[results_df['Trend'].str.contains("Bearish", na=False)]
