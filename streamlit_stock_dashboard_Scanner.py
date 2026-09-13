@@ -20,10 +20,20 @@ def get_stock_data(symbol, period="5y"):
     df = data.history(period=period)
     return df
 
+def get_tv_link(symbol):
+    """Generates a direct TradingView chart link based on the exchange."""
+    sym_upper = str(symbol).upper()
+    if sym_upper.endswith(".NS"):
+        tv_sym = f"NSE:{sym_upper.replace('.NS', '')}"
+    elif sym_upper.endswith(".BO"):
+        tv_sym = f"BSE:{sym_upper.replace('.BO', '')}"
+    else:
+        tv_sym = sym_upper
+    return f"https://www.tradingview.com/chart/?symbol={tv_sym}"
+
 def scan_stock(symbol, deep_scan=False):
-    """Calculates metrics for the scanner, including RVOL and Strong Start logic."""
+    """Calculates metrics for the scanner, including RVOL, Sparklines, and Strong Start logic."""
     try:
-        # Fetch less data for a fast scan, full data for a deep scan
         period = "5y" if deep_scan else "1y"
         df = get_stock_data(symbol, period)
         
@@ -34,8 +44,7 @@ def scan_stock(symbol, deep_scan=False):
         df.ta.ema(length=20, append=True)
         df.ta.ema(length=50, append=True)
         
-        # 2. RVOL and Strong Start Logic (Pine Script Translation)
-        # RVOL: Volume today compared to the average of the PREVIOUS 20 days
+        # 2. RVOL and Strong Start Logic
         df['Prev_Close'] = df['Close'].shift(1)
         df['Prev_Vol_20'] = df['Volume'].shift(1).rolling(window=20).mean()
         df['RVOL'] = df['Volume'] / df['Prev_Vol_20']
@@ -47,7 +56,7 @@ def scan_stock(symbol, deep_scan=False):
         l = latest['Low']
         h = latest['High']
         
-        # Evaluate Price Action based on Pine Script
+        # Evaluate Price Action
         strong_bull_action = (pd.notna(o) and pd.notna(pc) and pd.notna(l)) and (o > pc) and (l >= pc * 0.995)
         strong_bear_action = (pd.notna(o) and pd.notna(pc) and pd.notna(h)) and (o < pc) and (h <= pc * 1.005)
         
@@ -59,7 +68,7 @@ def scan_stock(symbol, deep_scan=False):
         else:
             base_trend = "Neutral"
             
-        # Combine Trend with Price Action for Final Label
+        # Final Label
         if base_trend == "Bullish" and strong_bull_action:
             trend = "Strong Bullish 🚀"
         elif base_trend == "Bearish" and strong_bear_action:
@@ -71,15 +80,26 @@ def scan_stock(symbol, deep_scan=False):
         else:
             trend = "Neutral ⚪"
             
-        # Fast scan returns the trend, LTP, and RVOL
         rvol_val = round(latest['RVOL'], 2) if pd.notna(latest['RVOL']) else None
         
+        # Grab last 30 days of closes for the Sparkline chart
+        history_30d = df['Close'].tail(30).tolist()
+        
+        base_dict = {
+            "Trend": trend,
+            "LTP": round(ltp, 2),
+            "RVOL": rvol_val,
+            "Chart (30d)": history_30d,
+            "TradingView": get_tv_link(symbol)
+        }
+        
         if not deep_scan:
-            return {"Trend": trend, "LTP": round(ltp, 2), "RVOL": rvol_val}
+            return base_dict
             
         # Deep scan adds advanced metrics
         if len(df) < 252:
-             return {"Trend": f"{trend} (Limited Data)", "LTP": round(ltp, 2), "RVOL": rvol_val}
+             base_dict["Trend"] = f"{trend} (Limited Data)"
+             return base_dict
              
         df.ta.ema(length=200, append=True)
         df.ta.rsi(length=14, append=True)
@@ -90,10 +110,7 @@ def scan_stock(symbol, deep_scan=False):
                 return ((ltp - df['Close'].iloc[-days]) / df['Close'].iloc[-days]) * 100
             return None
 
-        return {
-            "Trend": trend,
-            "LTP": round(ltp, 2),
-            "RVOL": rvol_val,
+        deep_dict = {
             "1M Ret %": round(get_ret(21), 2) if get_ret(21) else None,
             "3M Ret %": round(get_ret(63), 2) if get_ret(63) else None,
             "6M Ret %": round(get_ret(126), 2) if get_ret(126) else None,
@@ -103,6 +120,8 @@ def scan_stock(symbol, deep_scan=False):
             "RSI": round(latest.get('RSI_14', np.nan), 2),
             "ADX": round(latest.get('ADX_14', np.nan), 2)
         }
+        base_dict.update(deep_dict)
+        return base_dict
     except Exception:
         return {"Trend": "Error ⚠️"}
 
@@ -128,6 +147,21 @@ def calculate_return(df, days):
 def safe_get(value):
     """Formats numerical values safely to avoid NaN errors."""
     return f"{value:.2f}" if pd.notna(value) else "N/A"
+
+def render_plotly_chart(df_sliced, symbol):
+    """Reusable function to render the interactive chart."""
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=df_sliced.index, open=df_sliced['Open'], high=df_sliced['High'], low=df_sliced['Low'], close=df_sliced['Close'], name='Price'))
+    
+    if 'EMA_20' in df_sliced:
+        fig.add_trace(go.Scatter(x=df_sliced.index, y=df_sliced['EMA_20'], line=dict(color='orange', width=1.5), name='20 EMA'))
+    if 'EMA_50' in df_sliced:
+         fig.add_trace(go.Scatter(x=df_sliced.index, y=df_sliced['EMA_50'], line=dict(color='yellow', width=1.5), name='50 EMA'))
+    if 'EMA_200' in df_sliced:
+        fig.add_trace(go.Scatter(x=df_sliced.index, y=df_sliced['EMA_200'], line=dict(color='blue', width=1.5), name='200 EMA'))
+    
+    fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0))
+    st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------------------------------------------------------
 # SIDEBAR NAVIGATION
@@ -227,25 +261,16 @@ if app_mode == "Single Stock Analysis":
 
         if show_chart:
             st.subheader(f"Price Chart: {symbol}")
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(x=df_sliced.index, open=df_sliced['Open'], high=df_sliced['High'], low=df_sliced['Low'], close=df_sliced['Close'], name='Price'))
-            
-            if 'EMA_20' in df_sliced:
-                fig.add_trace(go.Scatter(x=df_sliced.index, y=df_sliced['EMA_20'], line=dict(color='orange', width=1.5), name='20 EMA'))
-            if 'EMA_200' in df_sliced:
-                fig.add_trace(go.Scatter(x=df_sliced.index, y=df_sliced['EMA_200'], line=dict(color='blue', width=1.5), name='200 EMA'))
-            
-            fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig, use_container_width=True)
+            render_plotly_chart(df_sliced, symbol)
 
 # -----------------------------------------------------------------------------
 # MODE 2: BULK STOCK SCANNER
 # -----------------------------------------------------------------------------
 elif app_mode == "Bulk Stock Scanner":
-    st.title("🔎 Bulk Stock Scanner")
+    st.title("🔎 Bulk Stock Scanner & Ranker")
     st.markdown("""
-    Upload a **CSV** or **Excel** file containing a list of stock symbols. 
-    The file must have a column header named exactly **Symbol**.
+    Upload a **CSV** or **Excel** file containing a list of stock symbols (column header must be exactly **Symbol**). 
+    Stocks are automatically **ranked by Relative Volume (RVOL)** to highlight the strongest momentum plays.
     """)
     
     scan_exchange = st.radio("Apply exchange formatting to the uploaded list?", ["Keep As Is (US/Mixed)", "Append .NS (NSE)", "Append .BO (BSE)"])
@@ -254,6 +279,10 @@ elif app_mode == "Bulk Stock Scanner":
     
     uploaded_file = st.file_uploader("Upload your list", type=["csv", "xlsx"])
     
+    # Store symbols in session state so we can access them for the chart dropdown later
+    if 'raw_symbols' not in st.session_state:
+        st.session_state['raw_symbols'] = []
+        
     if uploaded_file:
         try:
             if uploaded_file.name.endswith('.csv'):
@@ -267,13 +296,14 @@ elif app_mode == "Bulk Stock Scanner":
         if 'Symbol' not in df_list.columns:
             st.error("❌ Your file must contain a column named 'Symbol'.")
         else:
-            raw_symbols = df_list['Symbol'].dropna().astype(str).unique()
+            st.session_state['raw_symbols'] = df_list['Symbol'].dropna().astype(str).unique()
             
             if st.button("Start Scan 🚀"):
                 results = []
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
+                raw_symbols = st.session_state['raw_symbols']
                 for i, raw_sym in enumerate(raw_symbols):
                     if scan_exchange == "Append .NS (NSE)":
                         sym = format_symbol(raw_sym, "NSE (India)")
@@ -284,11 +314,9 @@ elif app_mode == "Bulk Stock Scanner":
                         
                     status_text.text(f"Scanning {sym} ({i+1}/{len(raw_symbols)})...")
                     
-                    # Fetch the metrics based on user selection
                     scan_data = scan_stock(sym, deep_scan=deep_scan)
                     
-                    # Build the row dictionary
-                    row_data = {"Scanned Symbol": sym, "Original File Symbol": raw_sym}
+                    row_data = {"Scanned Symbol": sym, "Original": raw_sym}
                     row_data.update(scan_data)
                     results.append(row_data)
                     
@@ -299,33 +327,85 @@ elif app_mode == "Bulk Stock Scanner":
                 results_df = pd.DataFrame(results)
                 
                 if 'Trend' in results_df.columns:
-                    # Filter into specific DataFrames
-                    strong_bull_df = results_df[results_df['Trend'] == "Strong Bullish 🚀"]
-                    strong_bear_df = results_df[results_df['Trend'] == "Strong Bearish 🩸"]
-                    bullish_df = results_df[results_df['Trend'] == "Bullish 🟢"]
-                    bearish_df = results_df[results_df['Trend'] == "Bearish 🔴"]
+                    # Sort overall by RVOL (highest volume = highest priority)
+                    results_df = results_df.sort_values(by="RVOL", ascending=False, na_position='last')
+                    
+                    # Helper function to assign ranks to a dataframe
+                    def rank_df(df_subset):
+                        df_subset = df_subset.copy().reset_index(drop=True)
+                        if not df_subset.empty:
+                            df_subset.insert(0, 'Rank', df_subset.index + 1)
+                        return df_subset
+                    
+                    # Filter and Rank
+                    strong_bull_df = rank_df(results_df[results_df['Trend'] == "Strong Bullish 🚀"])
+                    strong_bear_df = rank_df(results_df[results_df['Trend'] == "Strong Bearish 🩸"])
+                    bullish_df = rank_df(results_df[results_df['Trend'] == "Bullish 🟢"])
+                    bearish_df = rank_df(results_df[results_df['Trend'] == "Bearish 🔴"])
+                    results_df_ranked = rank_df(results_df)
                 else:
-                    strong_bull_df = pd.DataFrame()
-                    strong_bear_df = pd.DataFrame()
-                    bullish_df = pd.DataFrame()
-                    bearish_df = pd.DataFrame()
+                    strong_bull_df = strong_bear_df = bullish_df = bearish_df = results_df_ranked = pd.DataFrame()
                 
-                # Create 5 distinct tabs for the new categories
+                # Configuration for special columns (Sparklines and Links)
+                column_cfg = {
+                    "Chart (30d)": st.column_config.LineChartColumn("30-Day Trend"),
+                    "TradingView": st.column_config.LinkColumn("TradingView", display_text="Open Chart 🔗")
+                }
+                
+                # Create 5 distinct tabs
                 tab1, tab2, tab3, tab4, tab5 = st.tabs([
                     f"Strong Bullish 🚀 ({len(strong_bull_df)})", 
                     f"Strong Bearish 🩸 ({len(strong_bear_df)})",
                     f"Bullish 🟢 ({len(bullish_df)})",
                     f"Bearish 🔴 ({len(bearish_df)})",
-                    f"All Results ({len(results_df)})"
+                    f"All Results ({len(results_df_ranked)})"
                 ])
                 
                 with tab1:
-                    st.dataframe(strong_bull_df, use_container_width=True, hide_index=True)
+                    st.dataframe(strong_bull_df, use_container_width=True, hide_index=True, column_config=column_cfg)
                 with tab2:
-                    st.dataframe(strong_bear_df, use_container_width=True, hide_index=True)
+                    st.dataframe(strong_bear_df, use_container_width=True, hide_index=True, column_config=column_cfg)
                 with tab3:
-                    st.dataframe(bullish_df, use_container_width=True, hide_index=True)
+                    st.dataframe(bullish_df, use_container_width=True, hide_index=True, column_config=column_cfg)
                 with tab4:
-                    st.dataframe(bearish_df, use_container_width=True, hide_index=True)
+                    st.dataframe(bearish_df, use_container_width=True, hide_index=True, column_config=column_cfg)
                 with tab5:
-                    st.dataframe(results_df, use_container_width=True, hide_index=True)
+                    st.dataframe(results_df_ranked, use_container_width=True, hide_index=True, column_config=column_cfg)
+
+    # -------------------------------------------------------------------------
+    # IN-DASHBOARD CHART VIEWER FOR SCANNED STOCKS
+    # -------------------------------------------------------------------------
+    if len(st.session_state.get('raw_symbols', [])) > 0:
+        st.write("---")
+        st.subheader("📊 Inspect Scanned Stock Chart")
+        
+        colA, colB = st.columns([1, 3])
+        with colA:
+            selected_raw = st.selectbox("Select a scanned stock to view:", st.session_state['raw_symbols'])
+            chart_timeframe = st.selectbox("Timeframe:", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+        
+        with colB:
+            if scan_exchange == "Append .NS (NSE)":
+                chart_sym = format_symbol(selected_raw, "NSE (India)")
+            elif scan_exchange == "Append .BO (BSE)":
+                chart_sym = format_symbol(selected_raw, "BSE (India)")
+            else:
+                chart_sym = selected_raw.strip().upper()
+                
+            with st.spinner(f"Loading chart for {chart_sym}..."):
+                try:
+                    c_df = get_stock_data(chart_sym, period="5y")
+                    if not c_df.empty:
+                        c_df.ta.ema(length=20, append=True)
+                        c_df.ta.ema(length=50, append=True)
+                        c_df.ta.ema(length=200, append=True)
+                        
+                        days_dict = {"1mo": 21, "3mo": 63, "6mo": 126, "1y": 252, "2y": 504, "5y": len(c_df)}
+                        disp_period = days_dict.get(chart_timeframe, 252)
+                        c_df_sliced = c_df.iloc[-disp_period:].copy()
+                        
+                        render_plotly_chart(c_df_sliced, chart_sym)
+                    else:
+                        st.warning("No data available for this chart.")
+                except Exception as e:
+                    st.error(f"Could not load chart: {e}")
