@@ -21,7 +21,7 @@ def get_stock_data(symbol, period="5y"):
     return df
 
 def scan_stock(symbol, deep_scan=False):
-    """Calculates metrics for the scanner. Adjusts depth based on user selection."""
+    """Calculates metrics for the scanner, including RVOL and Strong Start logic."""
     try:
         # Fetch less data for a fast scan, full data for a deep scan
         period = "5y" if deep_scan else "1y"
@@ -30,31 +30,60 @@ def scan_stock(symbol, deep_scan=False):
         if df.empty or len(df) < 50:
             return {"Trend": "Not Enough Data ⚠️"}
             
-        # Base indicators for Trend
+        # 1. Base indicators for Trend (EMAs)
         df.ta.ema(length=20, append=True)
         df.ta.ema(length=50, append=True)
+        
+        # 2. RVOL and Strong Start Logic (Pine Script Translation)
+        # RVOL: Volume today compared to the average of the PREVIOUS 20 days
+        df['Prev_Close'] = df['Close'].shift(1)
+        df['Prev_Vol_20'] = df['Volume'].shift(1).rolling(window=20).mean()
+        df['RVOL'] = df['Volume'] / df['Prev_Vol_20']
+        
         latest = df.iloc[-1]
         ltp = latest['Close']
+        pc = latest['Prev_Close']
+        o = latest['Open']
+        l = latest['Low']
+        h = latest['High']
         
+        # Evaluate Price Action based on Pine Script
+        strong_bull_action = (pd.notna(o) and pd.notna(pc) and pd.notna(l)) and (o > pc) and (l >= pc * 0.995)
+        strong_bear_action = (pd.notna(o) and pd.notna(pc) and pd.notna(h)) and (o < pc) and (h <= pc * 1.005)
+        
+        # Determine Base Trend
         if latest['EMA_20'] > latest['EMA_50']:
-            trend = "Bullish 🟢"
+            base_trend = "Bullish"
         elif latest['EMA_20'] < latest['EMA_50']:
+            base_trend = "Bearish"
+        else:
+            base_trend = "Neutral"
+            
+        # Combine Trend with Price Action for Final Label
+        if base_trend == "Bullish" and strong_bull_action:
+            trend = "Strong Bullish 🚀"
+        elif base_trend == "Bearish" and strong_bear_action:
+            trend = "Strong Bearish 🩸"
+        elif base_trend == "Bullish":
+            trend = "Bullish 🟢"
+        elif base_trend == "Bearish":
             trend = "Bearish 🔴"
         else:
             trend = "Neutral ⚪"
             
-        # Fast scan returns just the trend
+        # Fast scan returns the trend, LTP, and RVOL
+        rvol_val = round(latest['RVOL'], 2) if pd.notna(latest['RVOL']) else None
+        
         if not deep_scan:
-            return {"Trend": trend, "LTP": round(ltp, 2)}
+            return {"Trend": trend, "LTP": round(ltp, 2), "RVOL": rvol_val}
             
         # Deep scan adds advanced metrics
         if len(df) < 252:
-             return {"Trend": f"{trend} (Limited Data)"}
+             return {"Trend": f"{trend} (Limited Data)", "LTP": round(ltp, 2), "RVOL": rvol_val}
              
         df.ta.ema(length=200, append=True)
         df.ta.rsi(length=14, append=True)
         df.ta.adx(length=14, append=True)
-        latest = df.iloc[-1]
         
         def get_ret(days):
             if len(df) > days:
@@ -64,6 +93,7 @@ def scan_stock(symbol, deep_scan=False):
         return {
             "Trend": trend,
             "LTP": round(ltp, 2),
+            "RVOL": rvol_val,
             "1M Ret %": round(get_ret(21), 2) if get_ret(21) else None,
             "3M Ret %": round(get_ret(63), 2) if get_ret(63) else None,
             "6M Ret %": round(get_ret(126), 2) if get_ret(126) else None,
@@ -220,7 +250,6 @@ elif app_mode == "Bulk Stock Scanner":
     
     scan_exchange = st.radio("Apply exchange formatting to the uploaded list?", ["Keep As Is (US/Mixed)", "Append .NS (NSE)", "Append .BO (BSE)"])
     
-    # NEW: Toggle for deep metrics
     deep_scan = st.checkbox("Include Deep Metrics (Returns, RSI, ADX, etc.) ⚠️ Note: Checking this makes the scan slower. Recommended for lists under 200 stocks.", value=False)
     
     uploaded_file = st.file_uploader("Upload your list", type=["csv", "xlsx"])
@@ -260,7 +289,7 @@ elif app_mode == "Bulk Stock Scanner":
                     
                     # Build the row dictionary
                     row_data = {"Scanned Symbol": sym, "Original File Symbol": raw_sym}
-                    row_data.update(scan_data) # Merges the metrics into the row
+                    row_data.update(scan_data)
                     results.append(row_data)
                     
                     progress_bar.progress((i + 1) / len(raw_symbols))
@@ -269,19 +298,34 @@ elif app_mode == "Bulk Stock Scanner":
                 
                 results_df = pd.DataFrame(results)
                 
-                # Make sure the Trend column exists before filtering
                 if 'Trend' in results_df.columns:
-                    bullish_df = results_df[results_df['Trend'].astype(str).str.contains("Bullish", na=False)]
-                    bearish_df = results_df[results_df['Trend'].astype(str).str.contains("Bearish", na=False)]
+                    # Filter into specific DataFrames
+                    strong_bull_df = results_df[results_df['Trend'] == "Strong Bullish 🚀"]
+                    strong_bear_df = results_df[results_df['Trend'] == "Strong Bearish 🩸"]
+                    bullish_df = results_df[results_df['Trend'] == "Bullish 🟢"]
+                    bearish_df = results_df[results_df['Trend'] == "Bearish 🔴"]
                 else:
+                    strong_bull_df = pd.DataFrame()
+                    strong_bear_df = pd.DataFrame()
                     bullish_df = pd.DataFrame()
                     bearish_df = pd.DataFrame()
                 
-                tab1, tab2, tab3 = st.tabs([f"Bullish 🟢 ({len(bullish_df)})", f"Bearish 🔴 ({len(bearish_df)})", f"All Results ({len(results_df)})"])
+                # Create 5 distinct tabs for the new categories
+                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                    f"Strong Bullish 🚀 ({len(strong_bull_df)})", 
+                    f"Strong Bearish 🩸 ({len(strong_bear_df)})",
+                    f"Bullish 🟢 ({len(bullish_df)})",
+                    f"Bearish 🔴 ({len(bearish_df)})",
+                    f"All Results ({len(results_df)})"
+                ])
                 
                 with tab1:
-                    st.dataframe(bullish_df, use_container_width=True, hide_index=True)
+                    st.dataframe(strong_bull_df, use_container_width=True, hide_index=True)
                 with tab2:
-                    st.dataframe(bearish_df, use_container_width=True, hide_index=True)
+                    st.dataframe(strong_bear_df, use_container_width=True, hide_index=True)
                 with tab3:
+                    st.dataframe(bullish_df, use_container_width=True, hide_index=True)
+                with tab4:
+                    st.dataframe(bearish_df, use_container_width=True, hide_index=True)
+                with tab5:
                     st.dataframe(results_df, use_container_width=True, hide_index=True)
